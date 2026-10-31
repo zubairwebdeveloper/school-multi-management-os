@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    function isPlatformAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/platformAdmins/$(request.auth.uid));
+    }
+
+    function member(tenantId) {
+      return get(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid)).data;
+    }
+
+    function isActiveMember(tenantId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid)) &&
+        member(tenantId).status == 'ACTIVE';
+    }
+
+    function orgWide(tenantId) {
+      return isActiveMember(tenantId) &&
+        member(tenantId).role in ['OWNER','GROUP_ADMIN','ACADEMIC_ADMIN','FINANCE_ADMIN','HR_ADMIN','ADMISSIONS_MANAGER','IT_ADMIN'];
+    }
+
+    function inCampus(tenantId, campusId) {
+      return isActiveMember(tenantId) &&
+        (orgWide(tenantId) || campusId in member(tenantId).campusIds);
+    }
+
+    // Platform
+    match /platformAdmins/{uid} { allow read, write: if false; }
+    match /platformAuditLogs/{id} { allow read: if isPlatformAdmin(); allow write: if false; }
+    match /tenantApplications/{id} {
+      allow read: if isPlatformAdmin() || (signedIn() && resource.data.applicantUid == request.auth.uid);
+      allow write: if false; // server only
+    }
+
+    match /tenants/{tenantId} {
+      allow read: if isActiveMember(tenantId) || isPlatformAdmin();
+      allow write: if false;
+
+      // Memberships: users read only their own; changes server-only
+      match /members/{uid} {
+        allow read: if signedIn() && (request.auth.uid == uid || orgWide(tenantId));
+        allow write: if false;
+      }
+
+      match /campuses/{campusId} {
+        allow read: if inCampus(tenantId, campusId);
+        allow write: if false;
+      }
+
+      // Campus-owned records: every doc must carry campusId
+      match /students/{studentId} {
+        allow read: if inCampus(tenantId, resource.data.campusId);
+        allow write: if false; // writes go through server-side authorized API
+      }
+      match /studentAttendance/{id} {
+        allow read: if inCampus(tenantId, resource.data.campusId);
+        allow write: if false;
+      }
+
+      // Highly restricted collections: server only
+      match /safeguardingCases/{id} { allow read, write: if false; }
+      match /clinicVisits/{id}      { allow read, write: if false; }
+      match /payroll/{id}           { allow read, write: if false; }
+      match /salaryRecords/{id}     { allow read, write: if false; }
+      match /auditLogs/{id}         { allow read, write: if false; }
+      match /aiApprovals/{id}       { allow read, write: if false; }
+      match /apiKeys/{id}           { allow read, write: if false; }
+
+      // Default deny for everything else under the tenant
+      match /{document=**} { allow read, write: if false; }
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
